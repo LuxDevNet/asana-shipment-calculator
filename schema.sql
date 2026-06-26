@@ -2,23 +2,34 @@
 -- Run this in your Supabase SQL Editor (https://supabase.com/dashboard)
 
 -- =========================================================================
--- 1. Base Tables (Adjust column types/names if they already exist)
+-- 1. Base Tables (Matches your exact schema)
 -- =========================================================================
 
--- In-house generated shipments (using SKU/internal IDs)
-CREATE TABLE IF NOT EXISTS packlists (
+-- In-house generated shipments
+CREATE TABLE IF NOT EXISTS packlist (
   shipment_id TEXT NOT NULL,
-  sku TEXT NOT NULL,
-  quantity INTEGER NOT NULL,
-  PRIMARY KEY (shipment_id, sku)
+  created_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  shipped_qty INTEGER NOT NULL,
+  fnsku TEXT,
+  asin TEXT,
+  sku TEXT,
+  PRIMARY KEY (shipment_id, COALESCE(sku, fnsku, asin, 'unknown'))
 );
 
--- Amazon shipments manually pulled (using SKU, FNSKU, or ASIN)
-CREATE TABLE IF NOT EXISTS shipping_queue (
-  shipment_id TEXT NOT NULL,
-  item_identifier TEXT NOT NULL, -- can be SKU, FNSKU, or ASIN
-  quantity INTEGER NOT NULL,
-  PRIMARY KEY (shipment_id, item_identifier)
+-- Amazon shipments manually pulled
+CREATE TABLE IF NOT EXISTS shipping (
+  "Shipment name" TEXT,
+  "Shipment ID" TEXT NOT NULL,
+  "Reference ID" TEXT,
+  "Status" TEXT,
+  "Created at" TEXT,
+  "Last updated" TEXT,
+  "Ship to" TEXT,
+  "SKUs" TEXT NOT NULL, -- The item identifier
+  "Units expected" INTEGER NOT NULL, -- Quantity
+  "Units located" INTEGER,
+  "Difference" INTEGER,
+  PRIMARY KEY ("Shipment ID", "SKUs")
 );
 
 -- Product mapping table to resolve FNSKU, ASIN, or SKU to Canonical SKU
@@ -40,21 +51,23 @@ CREATE TABLE IF NOT EXISTS cogs (
 -- 2. Unified Shipment Items View
 -- =========================================================================
 CREATE OR REPLACE VIEW unified_shipment_items AS
+  -- In-house packlist shipments
   SELECT 
     'in-house' AS source_type,
     shipment_id,
-    sku AS item_identifier,
-    quantity
-  FROM packlists
+    COALESCE(sku, fnsku, asin) AS item_identifier,
+    shipped_qty AS quantity
+  FROM packlist
   
   UNION ALL
   
+  -- Amazon shipping queue shipments
   SELECT 
     'amazon' AS source_type,
-    shipment_id,
-    item_identifier,
-    quantity
-  FROM shipping_queue;
+    "Shipment ID" AS shipment_id,
+    "SKUs" AS item_identifier,
+    "Units expected" AS quantity
+  FROM shipping;
 
 -- =========================================================================
 -- 3. COGS & Valuation Summary View
@@ -93,12 +106,12 @@ INSERT INTO product_mapping (source_identifier, canonical_sku) VALUES
   ('ASIN-B', 'PROD-B')
 ON CONFLICT (source_identifier) DO NOTHING;
 
-INSERT INTO packlists (shipment_id, sku, quantity) VALUES
+INSERT INTO packlist (shipment_id, sku, shipped_qty) VALUES
   ('SHIP-INHOUSE-01', 'PROD-A', 50),
   ('SHIP-INHOUSE-01', 'PROD-B', 100)
-ON CONFLICT (shipment_id, sku) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
-INSERT INTO shipping_queue (shipment_id, item_identifier, quantity) VALUES
+INSERT INTO shipping ("Shipment ID", "SKUs", "Units expected") VALUES
   ('SHIP-AMZ-99', 'FNSKU-AMZ-A', 150),
   ('SHIP-AMZ-99', 'ASIN-B', 200)
-ON CONFLICT (shipment_id, item_identifier) DO NOTHING;
+ON CONFLICT DO NOTHING;
