@@ -65,14 +65,14 @@ app.get("/auth", (c) => {
 // -------------------- API Endpoints --------------------
 
 // Widget Metadata: https://developers.asana.com/docs/get-widget-metadata
-// This returns the COGS dynamically to the Asana Task card
+// Displays the calculated values (AMZ, LMZ, and Difference) in Asana
 app.get("/widget", async (c) => {
   const supabase = c.get("supabase");
   const resourceUrl = c.req.query("resource_url") || "";
 
   console.log("Fetching widget for resource:", resourceUrl);
 
-  // Extract shipment ID from the URL (e.g. https://domain.com/shipments/SH-1001)
+  // Extract shipment ID from the URL (e.g. https://domain.com/shipments/SHIP-INHOUSE-01)
   const match = resourceUrl.match(/\/shipments\/([^/?#]+)/);
   const shipmentId = match ? decodeURIComponent(match[1]) : null;
 
@@ -86,46 +86,59 @@ app.get("/widget", async (c) => {
     });
   }
 
-  // Fetch Shipment COGS and Carrier from Supabase
+  // Fetch Shipment COGS values from the SQL view
   const { data: shipment, error } = await supabase
-    .from("shipments")
+    .from("shipment_cogs_summary")
     .select("*")
-    .eq("id", shipmentId)
+    .eq("shipment_id", shipmentId)
     .single();
 
   if (error || !shipment) {
-    console.error("Error fetching shipment:", error);
+    console.error("Error fetching shipment calculations:", error);
     return c.json({
       template: "summary_with_details_v0",
       metadata: {
         title: `Shipment ${shipmentId} Not Found`,
-        subtitle: "Verify the ID exists in Supabase database",
+        subtitle: "Check the ID in packlists or shipping_queue",
       },
     });
   }
 
+  // Determine pill color for the difference
+  const diffVal = Number(shipment.shipment_value_dif);
+  let diffColor = "none";
+  if (diffVal > 0) diffColor = "red";       // Amazon is higher than Luminize
+  if (diffVal < 0) diffColor = "green";     // Luminize is higher than Amazon
+  if (diffVal === 0) diffColor = "blue";
+
   return c.json({
     template: "summary_with_details_v0",
     metadata: {
-      title: `Shipment ${shipment.id}`,
-      subtitle: `Carrier: ${shipment.carrier || "Unknown"}`,
+      title: shipment.shipment_id,
+      subtitle: `Source: ${shipment.source_type.toUpperCase()} | Qty: ${shipment.total_quantity}`,
       fields: [
         {
-          name: "Shipment COGS",
+          name: "AMZ Value",
           type: "pill",
-          text: `$${Number(shipment.cogs).toFixed(2)}`,
-          color: "hot-pink",
+          text: `$${Number(shipment.shipment_value_amz).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          color: "orange",
         },
         {
-          name: "Status",
+          name: "LMZ Value",
           type: "pill",
-          text: shipment.status || "N/A",
-          color: shipment.status === "Delivered" ? "green" : "blue",
+          text: `$${Number(shipment.shipment_value_lmz).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          color: "blue",
+        },
+        {
+          name: "Difference",
+          type: "pill",
+          text: `$${diffVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          color: diffColor,
         },
       ],
       footer: {
         footer_type: "custom_text",
-        text: "Database Sync: Supabase Edge",
+        text: `Calculated from ${shipment.total_items} items`,
       },
       num_comments: 0,
     },
@@ -133,7 +146,6 @@ app.get("/widget", async (c) => {
 });
 
 // Form Metadata: https://developers.asana.com/docs/get-form-metadata
-// Renders the Modal Form in Asana
 app.get("/form/metadata", (c) => {
   const baseUrl = getBaseUrl(c.req.url);
   return c.json({
@@ -148,7 +160,7 @@ app.get("/form/metadata", (c) => {
           type: "typeahead",
           id: "shipment_id",
           is_required: true,
-          placeholder: "Search by Shipment ID (e.g. SH-1001)",
+          placeholder: "Search by Shipment ID (e.g. SHIP-AMZ-99)",
           typeahead_url: `${baseUrl}/search/typeahead`,
           width: "full",
         },
@@ -158,17 +170,17 @@ app.get("/form/metadata", (c) => {
 });
 
 // Typeahead Endpoint: https://developers.asana.com/docs/get-lookup-typeahead-results
-// Queries your Supabase database as the user types
 app.get("/search/typeahead", async (c) => {
   const supabase = c.get("supabase");
   const query = c.req.query("query") || "";
 
   console.log("Searching shipments matching query:", query);
 
+  // Search by shipment_id in the view
   const { data: shipments, error } = await supabase
-    .from("shipments")
-    .select("id, carrier, cogs")
-    .ilike("id", `%${query}%`)
+    .from("shipment_cogs_summary")
+    .select("shipment_id, source_type, total_items, total_quantity")
+    .ilike("shipment_id", `%${query}%`)
     .limit(10);
 
   if (error || !shipments) {
@@ -177,9 +189,9 @@ app.get("/search/typeahead", async (c) => {
   }
 
   const items = shipments.map((s) => ({
-    title: s.id,
-    subtitle: `Carrier: ${s.carrier || "N/A"} | COGS: $${Number(s.cogs).toFixed(2)}`,
-    value: s.id,
+    title: s.shipment_id,
+    subtitle: `Source: ${s.source_type.toUpperCase()} | Qty: ${s.total_quantity} (${s.total_items} items)`,
+    value: s.shipment_id,
   }));
 
   return c.json({ items });
@@ -199,7 +211,7 @@ app.post("/form/onchange", (c) => {
           type: "typeahead",
           id: "shipment_id",
           is_required: true,
-          placeholder: "Search by Shipment ID (e.g. SH-1001)",
+          placeholder: "Search by Shipment ID (e.g. SHIP-AMZ-99)",
           typeahead_url: `${baseUrl}/search/typeahead`,
           width: "full",
         },
@@ -209,7 +221,6 @@ app.post("/form/onchange", (c) => {
 });
 
 // Form Submit: https://developers.asana.com/docs/on-submit-callback
-// Returns the resource attachment containing the Shipment ID back to Asana
 app.post("/form/submit", async (c) => {
   const body = await c.req.json();
   const baseUrl = getBaseUrl(c.req.url);
