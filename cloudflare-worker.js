@@ -36,12 +36,76 @@ const getBaseUrl = (reqUrl) => {
 };
 
 // 3. Supabase Client Setup (Injects into context for every request)
+// Prefer service role key so the worker can read shipment_cogs_summary regardless of RLS.
 app.use("*", async (c, next) => {
   const supabaseUrl = c.env.SUPABASE_URL || "";
-  const supabaseAnonKey = c.env.SUPABASE_ANON_KEY || "";
-  c.set("supabase", createClient(supabaseUrl, supabaseAnonKey));
+  const supabaseKey =
+    c.env.SUPABASE_SERVICE_ROLE_KEY || c.env.SUPABASE_ANON_KEY || "";
+  c.set("supabase", createClient(supabaseUrl, supabaseKey));
   await next();
 });
+
+const formatCurrency = (value) =>
+  `$${Number(value).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const buildFormMetadata = (baseUrl, shipment = null) => {
+  const fields = [
+    {
+      name: "Search Shipment ID",
+      type: "typeahead",
+      id: "shipment_id",
+      is_required: true,
+      is_watched: true,
+      placeholder: "Search by Shipment ID (e.g. SHIP-AMZ-99)",
+      typeahead_url: `${baseUrl}/search/typeahead`,
+      width: "full",
+    },
+  ];
+
+  if (shipment) {
+    const diffVal = Number(shipment.shipment_value_dif);
+    fields.push(
+      {
+        type: "static_text",
+        id: "preview_header",
+        name: `Preview: ${shipment.shipment_id} (${shipment.source_type.toUpperCase()})`,
+      },
+      {
+        type: "static_text",
+        id: "preview_amz",
+        name: `AMZ Value: ${formatCurrency(shipment.shipment_value_amz)}`,
+      },
+      {
+        type: "static_text",
+        id: "preview_lmz",
+        name: `LMZ Value: ${formatCurrency(shipment.shipment_value_lmz)}`,
+      },
+      {
+        type: "static_text",
+        id: "preview_diff",
+        name: `Difference: ${formatCurrency(diffVal)}`,
+      },
+      {
+        type: "static_text",
+        id: "preview_items",
+        name: `${shipment.total_items} items | ${shipment.total_quantity} units`,
+      }
+    );
+  }
+
+  return {
+    template: "form_metadata_v0",
+    metadata: {
+      title: "Link Shipment COGS to Task",
+      on_submit_callback: `${baseUrl}/form/submit`,
+      on_change_callback: `${baseUrl}/form/onchange`,
+      fields,
+    },
+  };
+};
 
 // -------------------- Auth endpoint --------------------
 app.get("/auth", (c) => {
@@ -148,25 +212,7 @@ app.get("/widget", async (c) => {
 // Form Metadata: https://developers.asana.com/docs/get-form-metadata
 app.get("/form/metadata", (c) => {
   const baseUrl = getBaseUrl(c.req.url);
-  return c.json({
-    template: "form_metadata_v0",
-    metadata: {
-      title: "Link Shipment to Task",
-      on_submit_callback: `${baseUrl}/form/submit`,
-      on_change_callback: `${baseUrl}/form/onchange`,
-      fields: [
-        {
-          name: "Search Shipment ID",
-          type: "typeahead",
-          id: "shipment_id",
-          is_required: true,
-          placeholder: "Search by Shipment ID (e.g. SHIP-AMZ-99)",
-          typeahead_url: `${baseUrl}/search/typeahead`,
-          width: "full",
-        },
-      ],
-    },
-  });
+  return c.json(buildFormMetadata(baseUrl));
 });
 
 // Typeahead Endpoint: https://developers.asana.com/docs/get-lookup-typeahead-results
@@ -198,26 +244,27 @@ app.get("/search/typeahead", async (c) => {
 });
 
 // Form OnChange Callback: https://developers.asana.com/docs/on-change-callback
-app.post("/form/onchange", (c) => {
+app.post("/form/onchange", async (c) => {
+  const supabase = c.get("supabase");
   const baseUrl = getBaseUrl(c.req.url);
-  return c.json({
-    template: "form_metadata_v0",
-    metadata: {
-      title: "Link Shipment to Task",
-      on_submit_callback: `${baseUrl}/form/submit`,
-      fields: [
-        {
-          name: "Search Shipment ID",
-          type: "typeahead",
-          id: "shipment_id",
-          is_required: true,
-          placeholder: "Search by Shipment ID (e.g. SHIP-AMZ-99)",
-          typeahead_url: `${baseUrl}/search/typeahead`,
-          width: "full",
-        },
-      ],
-    },
-  });
+  const body = await c.req.json();
+  const shipmentId = body.values?.shipment_id;
+
+  if (!shipmentId) {
+    return c.json(buildFormMetadata(baseUrl));
+  }
+
+  const { data: shipment, error } = await supabase
+    .from("shipment_cogs_summary")
+    .select("*")
+    .eq("shipment_id", shipmentId)
+    .single();
+
+  if (error || !shipment) {
+    return c.json(buildFormMetadata(baseUrl));
+  }
+
+  return c.json(buildFormMetadata(baseUrl, shipment));
 });
 
 // Form Submit: https://developers.asana.com/docs/on-submit-callback
