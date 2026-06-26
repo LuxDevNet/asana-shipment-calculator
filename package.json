@@ -11,8 +11,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
     "cors": "^2.8.5",
     "express": "^4.17.1",
+    "hono": "^4.12.27",
     "path": "^0.12.7"
   },
   "devDependencies": {
